@@ -1,0 +1,233 @@
+version: '3.8'
+
+# Cube3D Text-to-Mesh Serving Infrastructure
+#
+# Services:
+#   - temporal: Temporal server for workflow orchestration
+#   - postgresql: Database for Temporal
+#   - triton-clip: Triton server for CLIP text encoding
+#   - triton-gpt: Triton server for GPT token generation
+#   - triton-mesh: Triton server for mesh decoding
+#   - worker: Temporal worker that calls Triton servers
+#   - api: FastAPI gateway for HTTP access
+#
+# Usage:
+#   docker-compose up -d
+#
+# Note: You need to export model weights before running. See README.md.
+
+services:
+  # ==========================================================================
+  # TEMPORAL INFRASTRUCTURE
+  # ==========================================================================
+
+  postgresql:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cube3d-net
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
+    ports:
+      - "7233:7233"  # gRPC
+    volumes:
+      - ./temporal-config:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cube3d-net
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8088:8080"  # Web UI
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # TRITON INFERENCE SERVERS
+  # ==========================================================================
+
+  # CLIP Text Encoder - lightweight, can run on smaller GPU
+  triton-clip:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/clip_encoder:/models/clip_encoder:ro
+      - ../:/models/cube3d:ro  # Mount cube3d source
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8000:8000"  # HTTP
+      - "8001:8001"  # gRPC
+      - "8002:8002"  # Metrics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cube3d-net
+
+  # GPT Token Generator - needs most GPU memory, A100 recommended
+  triton-gpt:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/gpt_generator:/models/gpt_generator:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8010:8000"
+      - "8011:8001"
+      - "8012:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '4gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s  # GPT takes longer to load
+    networks:
+      - cube3d-net
+
+  # Mesh Decoder - moderate GPU requirements
+  triton-mesh:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/mesh_decoder:/models/mesh_decoder:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8020:8000"
+      - "8021:8001"
+      - "8022:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '4gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # APPLICATION SERVICES
+  # ==========================================================================
+
+  # Temporal Worker - calls Triton servers
+  worker:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      triton-clip:
+        condition: service_healthy
+      triton-gpt:
+        condition: service_healthy
+      triton-mesh:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TASK_QUEUE=cube3d-mesh-generation
+      - TEMPORAL_NAMESPACE=default
+      - CLIP_TRITON_URL=triton-clip:8001
+      - GPT_TRITON_URL=triton-gpt:8001
+      - MESH_TRITON_URL=triton-mesh:8001
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # FastAPI Gateway
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TASK_QUEUE=cube3d-mesh-generation
+      - TEMPORAL_NAMESPACE=default
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+# ==========================================================================
+# VOLUMES AND NETWORKS
+# ==========================================================================
+
+volumes:
+  postgresql-data:
+
+networks:
+  cube3d-net:
+    driver: bridge

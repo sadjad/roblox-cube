@@ -1,0 +1,8 @@
+# Temporal Python SDK
+temporalio>=1.5.0
+
+# Triton client for calling inference servers
+tritonclient[grpc]>=2.40.0
+
+# Utilities
+numpy>=1.24.0

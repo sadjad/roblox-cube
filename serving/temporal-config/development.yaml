@@ -1,0 +1,32 @@
+# Temporal Dynamic Configuration for Development
+#
+# This file configures Temporal's behavior at runtime.
+# For production, you'd want stricter limits and monitoring.
+
+# Enable all namespaces
+system.enableEagerNamespaceRefresher:
+  - value: true
+
+# Frontend settings
+frontend.enableClientVersionCheck:
+  - value: true
+
+# History settings - increase for long-running workflows
+history.maximumSignalsPerExecution:
+  - value: 10000
+
+# Matching settings
+matching.numTaskqueueReadPartitions:
+  - value: 5
+matching.numTaskqueueWritePartitions:
+  - value: 5
+
+# Worker settings
+worker.enableScheduler:
+  - value: true
+
+# Increase payload size limits for mesh data
+limit.blobSize.warn:
+  - value: 2097152  # 2MB warning
+limit.blobSize.error:
+  - value: 10485760  # 10MB error (mesh data can be large)

@@ -1,0 +1,77 @@
+name: "clip_encoder"
+backend: "python"
+max_batch_size: 8
+
+input [
+  {
+    name: "prompt"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  },
+  {
+    name: "guidance_scale"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "bounding_box"
+    data_type: TYPE_FP32
+    dims: [ 3 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "condition_embeddings"
+    data_type: TYPE_FP16
+    dims: [ -1, 1536 ]  # [seq_len, embed_dim] - seq_len is 77 or 78 with bbox
+  },
+  {
+    name: "uncond_embeddings"
+    data_type: TYPE_FP16
+    dims: [ -1, 1536 ]  # Same shape as condition, for CFG
+  },
+  {
+    name: "guidance_scale_out"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  }
+]
+
+# Dynamic batching configuration
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4, 8 ]
+  max_queue_delay_microseconds: 50000  # 50ms max wait for batching
+}
+
+# Instance configuration
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Model parameters
+parameters: {
+  key: "CLIP_MODEL_NAME"
+  value: { string_value: "openai/clip-vit-large-patch14" }
+}
+
+parameters: {
+  key: "CUBE3D_PATH"
+  value: { string_value: "/models/cube3d" }
+}
+
+parameters: {
+  key: "GPT_CONFIG_PATH"
+  value: { string_value: "/models/cube3d/cube3d/configs/open_model_v0.5.yaml" }
+}
+
+parameters: {
+  key: "GPT_CHECKPOINT_PATH"
+  value: { string_value: "/models/weights/gpt.safetensors" }
+}

@@ -1,0 +1,86 @@
+name: "mesh_decoder"
+backend: "python"
+max_batch_size: 4  # Can batch multiple mesh decodings
+
+input [
+  {
+    name: "token_ids"
+    data_type: TYPE_INT32
+    dims: [ -1 ]  # [num_tokens] - typically 1024
+  },
+  {
+    name: "resolution_base"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "vertices"
+    data_type: TYPE_FP32
+    dims: [ -1, 3 ]  # [num_vertices, 3]
+  },
+  {
+    name: "faces"
+    data_type: TYPE_INT32
+    dims: [ -1, 3 ]  # [num_faces, 3]
+  },
+  {
+    name: "num_vertices"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  }
+]
+
+# Dynamic batching for mesh decoding
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4 ]
+  max_queue_delay_microseconds: 100000  # 100ms max wait
+}
+
+# Instance configuration
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Model parameters
+parameters: {
+  key: "CUBE3D_PATH"
+  value: { string_value: "/models/cube3d" }
+}
+
+parameters: {
+  key: "SHAPE_CONFIG_PATH"
+  value: { string_value: "/models/cube3d/cube3d/configs/open_model_v0.5.yaml" }
+}
+
+parameters: {
+  key: "SHAPE_CHECKPOINT_PATH"
+  value: { string_value: "/models/weights/shape.safetensors" }
+}
+
+parameters: {
+  key: "DEFAULT_RESOLUTION_BASE"
+  value: { string_value: "8.0" }
+}
+
+parameters: {
+  key: "USE_WARP"
+  value: { string_value: "true" }
+}
+
+parameters: {
+  key: "CHUNK_SIZE"
+  value: { string_value: "100000" }
+}

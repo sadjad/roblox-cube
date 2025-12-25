@@ -6,16 +6,18 @@ This workflow orchestrates the three-stage Cube3D pipeline:
 2. GPT token generation
 3. Mesh decoding
 
-Each stage is an activity that calls a Triton model.
+SCALING: Each stage runs on a separate task queue, allowing independent
+scaling by deploying different numbers of workers per queue.
 """
 
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Tuple, List
 
 from temporalio import workflow
 
-# Import activity stubs - these will be defined in activities module
+# Import activity stubs
 with workflow.unsafe.imports_passed_through():
     from ..activities import (
         encode_text,
@@ -23,6 +25,25 @@ with workflow.unsafe.imports_passed_through():
         decode_mesh,
     )
 
+
+# =============================================================================
+# TASK QUEUE CONFIGURATION
+# =============================================================================
+
+# Each activity runs on its own task queue for independent scaling
+# These can be overridden via environment variables in the workflow starter
+CLIP_TASK_QUEUE = os.getenv("CLIP_TASK_QUEUE", "cube3d-clip")
+GPT_TASK_QUEUE = os.getenv("GPT_TASK_QUEUE", "cube3d-gpt")
+MESH_TASK_QUEUE = os.getenv("MESH_TASK_QUEUE", "cube3d-mesh")
+
+# For simpler deployments, use a single queue for all activities
+UNIFIED_TASK_QUEUE = os.getenv("UNIFIED_TASK_QUEUE", "cube3d-mesh-generation")
+USE_UNIFIED_QUEUE = os.getenv("USE_UNIFIED_QUEUE", "false").lower() == "true"
+
+
+# =============================================================================
+# DATA MODELS
+# =============================================================================
 
 @dataclass
 class TextToMeshInput:
@@ -41,22 +62,29 @@ class TextToMeshOutput:
     faces: List[List[int]]  # [[v0, v1, v2], ...]
     num_vertices: int
     num_faces: int
-    # Include intermediate results for debugging/caching
     token_ids: Optional[List[int]] = None
 
+
+# =============================================================================
+# WORKFLOWS
+# =============================================================================
 
 @workflow.defn
 class TextToMeshWorkflow:
     """
     Temporal workflow that orchestrates text-to-mesh generation.
 
-    This workflow coordinates three Triton inference calls:
-    1. CLIP encoder: text -> embeddings
-    2. GPT generator: embeddings -> tokens
-    3. Mesh decoder: tokens -> mesh
+    This workflow coordinates three Triton inference calls, each on
+    a separate task queue for independent scaling:
 
-    The workflow is durable - if it fails partway through, it will
-    resume from the last completed activity.
+    1. CLIP encoder (cube3d-clip queue): text -> embeddings (~20ms)
+    2. GPT generator (cube3d-gpt queue): embeddings -> tokens (~10s) ← BOTTLENECK
+    3. Mesh decoder (cube3d-mesh queue): tokens -> mesh (~3s)
+
+    Scaling Example:
+      - 1 worker on cube3d-clip
+      - 10 workers on cube3d-gpt (bottleneck)
+      - 3 workers on cube3d-mesh
     """
 
     @workflow.run
@@ -70,10 +98,15 @@ class TextToMeshWorkflow:
         Returns:
             TextToMeshOutput with mesh vertices and faces
         """
-        workflow.logger.info(f"Starting text-to-mesh generation for: {input.prompt[:50]}...")
+        workflow.logger.info(f"Starting text-to-mesh: {input.prompt[:50]}...")
+
+        # Determine task queues
+        clip_queue = UNIFIED_TASK_QUEUE if USE_UNIFIED_QUEUE else CLIP_TASK_QUEUE
+        gpt_queue = UNIFIED_TASK_QUEUE if USE_UNIFIED_QUEUE else GPT_TASK_QUEUE
+        mesh_queue = UNIFIED_TASK_QUEUE if USE_UNIFIED_QUEUE else MESH_TASK_QUEUE
 
         # Stage 1: Encode text with CLIP
-        workflow.logger.info("Stage 1: Encoding text with CLIP...")
+        workflow.logger.info(f"Stage 1: CLIP encoding (queue: {clip_queue})")
         encoding_result = await workflow.execute_activity(
             encode_text,
             args=[
@@ -81,6 +114,7 @@ class TextToMeshWorkflow:
                 input.guidance_scale,
                 input.bounding_box,
             ],
+            task_queue=clip_queue,
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=workflow.RetryPolicy(
                 initial_interval=timedelta(seconds=1),
@@ -89,8 +123,8 @@ class TextToMeshWorkflow:
             ),
         )
 
-        # Stage 2: Generate tokens with GPT
-        workflow.logger.info("Stage 2: Generating tokens with GPT...")
+        # Stage 2: Generate tokens with GPT (BOTTLENECK)
+        workflow.logger.info(f"Stage 2: GPT generation (queue: {gpt_queue})")
         token_result = await workflow.execute_activity(
             generate_tokens,
             args=[
@@ -99,8 +133,9 @@ class TextToMeshWorkflow:
                 input.guidance_scale,
                 input.top_p,
             ],
+            task_queue=gpt_queue,
             start_to_close_timeout=timedelta(minutes=10),
-            heartbeat_timeout=timedelta(seconds=30),
+            heartbeat_timeout=timedelta(seconds=60),
             retry_policy=workflow.RetryPolicy(
                 initial_interval=timedelta(seconds=2),
                 maximum_interval=timedelta(seconds=60),
@@ -109,14 +144,16 @@ class TextToMeshWorkflow:
         )
 
         # Stage 3: Decode mesh
-        workflow.logger.info("Stage 3: Decoding mesh...")
+        workflow.logger.info(f"Stage 3: Mesh decoding (queue: {mesh_queue})")
         mesh_result = await workflow.execute_activity(
             decode_mesh,
             args=[
                 token_result["token_ids"],
                 input.resolution_base,
             ],
+            task_queue=mesh_queue,
             start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=60),
             retry_policy=workflow.RetryPolicy(
                 initial_interval=timedelta(seconds=1),
                 maximum_interval=timedelta(seconds=30),
@@ -125,8 +162,7 @@ class TextToMeshWorkflow:
         )
 
         workflow.logger.info(
-            f"Mesh generation complete: {mesh_result['num_vertices']} vertices, "
-            f"{mesh_result['num_faces']} faces"
+            f"Done: {mesh_result['num_vertices']} verts, {mesh_result['num_faces']} faces"
         )
 
         return TextToMeshOutput(
@@ -165,12 +201,16 @@ class TokensToMeshWorkflow:
         Returns:
             TextToMeshOutput with mesh data
         """
-        workflow.logger.info("Decoding tokens to mesh...")
+        mesh_queue = UNIFIED_TASK_QUEUE if USE_UNIFIED_QUEUE else MESH_TASK_QUEUE
+
+        workflow.logger.info(f"Decoding tokens to mesh (queue: {mesh_queue})")
 
         mesh_result = await workflow.execute_activity(
             decode_mesh,
             args=[token_ids, resolution_base],
+            task_queue=mesh_queue,
             start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=60),
             retry_policy=workflow.RetryPolicy(
                 initial_interval=timedelta(seconds=1),
                 maximum_interval=timedelta(seconds=30),

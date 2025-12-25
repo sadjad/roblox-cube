@@ -3,6 +3,16 @@ Temporal Activities for Cube3D Inference Pipeline.
 
 Each activity calls a Triton Inference Server model and transforms
 the results for the next stage.
+
+SCALING STRATEGY:
+  Each activity is registered on a separate task queue, allowing
+  independent scaling of each pipeline stage by running different
+  numbers of workers per queue.
+
+  Example:
+    - 1 worker on "cube3d-clip" queue (fast stage)
+    - 10 workers on "cube3d-gpt" queue (slow stage - BOTTLENECK)
+    - 3 workers on "cube3d-mesh" queue (medium stage)
 """
 
 import os
@@ -15,36 +25,38 @@ import tritonclient.grpc as grpcclient
 from tritonclient.utils import InferenceServerException
 
 
-# Configuration from environment
-CLIP_TRITON_URL = os.getenv("CLIP_TRITON_URL", "triton-clip:8001")
-GPT_TRITON_URL = os.getenv("GPT_TRITON_URL", "triton-gpt:8001")
-MESH_TRITON_URL = os.getenv("MESH_TRITON_URL", "triton-mesh:8001")
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
+# Triton server URLs - can point to single server or separate servers
+CLIP_TRITON_URL = os.getenv("CLIP_TRITON_URL", "triton:8001")
+GPT_TRITON_URL = os.getenv("GPT_TRITON_URL", "triton:8001")
+MESH_TRITON_URL = os.getenv("MESH_TRITON_URL", "triton:8001")
+
+# Model names in Triton
 CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "clip_encoder")
 GPT_MODEL_NAME = os.getenv("GPT_MODEL_NAME", "gpt_generator")
 MESH_MODEL_NAME = os.getenv("MESH_MODEL_NAME", "mesh_decoder")
 
+# Task queue names - workers register to specific queues based on their role
+CLIP_TASK_QUEUE = os.getenv("CLIP_TASK_QUEUE", "cube3d-clip")
+GPT_TASK_QUEUE = os.getenv("GPT_TASK_QUEUE", "cube3d-gpt")
+MESH_TASK_QUEUE = os.getenv("MESH_TASK_QUEUE", "cube3d-mesh")
+
+
+# =============================================================================
+# TRITON CLIENT HELPERS
+# =============================================================================
 
 def _create_triton_client(url: str) -> grpcclient.InferenceServerClient:
     """Create a Triton gRPC client."""
     return grpcclient.InferenceServerClient(url=url, verbose=False)
 
 
-def _numpy_to_triton_dtype(dtype: np.dtype) -> str:
-    """Convert numpy dtype to Triton dtype string."""
-    dtype_map = {
-        np.float32: "FP32",
-        np.float16: "FP16",
-        np.int32: "INT32",
-        np.int64: "INT64",
-        np.uint8: "UINT8",
-        np.bool_: "BOOL",
-    }
-    for np_type, triton_type in dtype_map.items():
-        if np.issubdtype(dtype, np_type):
-            return triton_type
-    raise ValueError(f"Unsupported dtype: {dtype}")
-
+# =============================================================================
+# ACTIVITIES - Each on its own task queue for independent scaling
+# =============================================================================
 
 @activity.defn
 async def encode_text(
@@ -55,6 +67,10 @@ async def encode_text(
     """
     Encode text prompt using CLIP encoder via Triton.
 
+    Task Queue: cube3d-clip (configurable via CLIP_TASK_QUEUE env var)
+    Latency: ~20ms
+    Scaling: 1 worker handles ~50 req/s (usually 1 worker is enough)
+
     Args:
         prompt: Text prompt to encode
         guidance_scale: Classifier-free guidance scale
@@ -63,12 +79,11 @@ async def encode_text(
     Returns:
         Dictionary with condition_embeddings, uncond_embeddings, guidance_scale
     """
-    activity.logger.info(f"Encoding text: {prompt[:50]}...")
+    activity.logger.info(f"[CLIP] Encoding: {prompt[:50]}...")
 
     client = _create_triton_client(CLIP_TRITON_URL)
 
     try:
-        # Prepare inputs
         inputs = []
 
         # Prompt input (string)
@@ -90,31 +105,24 @@ async def encode_text(
             bbox_input.set_data_from_numpy(bbox_data)
             inputs.append(bbox_input)
 
-        # Prepare outputs
         outputs = [
             grpcclient.InferRequestedOutput("condition_embeddings"),
             grpcclient.InferRequestedOutput("uncond_embeddings"),
             grpcclient.InferRequestedOutput("guidance_scale_out"),
         ]
 
-        # Call Triton
         result = client.infer(
             model_name=CLIP_MODEL_NAME,
             inputs=inputs,
             outputs=outputs,
         )
 
-        # Extract results
         cond_embeddings = result.as_numpy("condition_embeddings")
         uncond_embeddings = result.as_numpy("uncond_embeddings")
         guidance_out = result.as_numpy("guidance_scale_out")[0]
 
-        activity.logger.info(
-            f"Text encoded: cond_shape={cond_embeddings.shape}, "
-            f"uncond_shape={uncond_embeddings.shape}"
-        )
+        activity.logger.info(f"[CLIP] Done: shape={cond_embeddings.shape}")
 
-        # Return as serializable dict (convert numpy to lists for Temporal)
         return {
             "condition_embeddings": cond_embeddings.tolist(),
             "uncond_embeddings": uncond_embeddings.tolist(),
@@ -122,7 +130,7 @@ async def encode_text(
         }
 
     except InferenceServerException as e:
-        activity.logger.error(f"Triton inference failed: {e}")
+        activity.logger.error(f"[CLIP] Triton error: {e}")
         raise
     finally:
         client.close()
@@ -139,6 +147,10 @@ async def generate_tokens(
     """
     Generate shape tokens using GPT model via Triton.
 
+    Task Queue: cube3d-gpt (configurable via GPT_TASK_QUEUE env var)
+    Latency: ~10 seconds
+    Scaling: THIS IS THE BOTTLENECK - need 10 workers per 1 req/s throughput
+
     Args:
         condition_embeddings: CLIP embeddings for the prompt
         uncond_embeddings: CLIP embeddings for empty prompt (for CFG)
@@ -149,16 +161,14 @@ async def generate_tokens(
     Returns:
         Dictionary with token_ids list
     """
-    activity.logger.info("Generating tokens with GPT...")
+    activity.logger.info("[GPT] Starting token generation...")
 
     client = _create_triton_client(GPT_TRITON_URL)
 
     try:
-        # Convert lists back to numpy arrays
         cond_np = np.array(condition_embeddings, dtype=np.float16)
         uncond_np = np.array(uncond_embeddings, dtype=np.float16)
 
-        # Prepare inputs
         inputs = []
 
         cond_input = grpcclient.InferInput(
@@ -189,11 +199,9 @@ async def generate_tokens(
         max_tokens_input.set_data_from_numpy(max_tokens_data)
         inputs.append(max_tokens_input)
 
-        # Prepare outputs
         outputs = [grpcclient.InferRequestedOutput("token_ids")]
 
-        # Call Triton (this is the slow part - GPT generation)
-        # Send heartbeats during long-running inference
+        # Heartbeat for long-running inference
         activity.heartbeat("Starting GPT inference...")
 
         result = client.infer(
@@ -202,17 +210,14 @@ async def generate_tokens(
             outputs=outputs,
         )
 
-        # Extract results
         token_ids = result.as_numpy("token_ids")
 
-        activity.logger.info(f"Generated {len(token_ids)} tokens")
+        activity.logger.info(f"[GPT] Done: {len(token_ids)} tokens")
 
-        return {
-            "token_ids": token_ids.tolist(),
-        }
+        return {"token_ids": token_ids.tolist()}
 
     except InferenceServerException as e:
-        activity.logger.error(f"Triton inference failed: {e}")
+        activity.logger.error(f"[GPT] Triton error: {e}")
         raise
     finally:
         client.close()
@@ -226,6 +231,10 @@ async def decode_mesh(
     """
     Decode tokens to mesh using shape decoder via Triton.
 
+    Task Queue: cube3d-mesh (configurable via MESH_TASK_QUEUE env var)
+    Latency: ~3 seconds
+    Scaling: 3 workers per 1 req/s throughput
+
     Args:
         token_ids: List of 1024 token IDs
         resolution_base: Grid resolution as power of 2
@@ -233,15 +242,13 @@ async def decode_mesh(
     Returns:
         Dictionary with vertices, faces, num_vertices, num_faces
     """
-    activity.logger.info(f"Decoding mesh at resolution 2^{resolution_base}...")
+    activity.logger.info(f"[MESH] Decoding at resolution 2^{resolution_base}...")
 
     client = _create_triton_client(MESH_TRITON_URL)
 
     try:
-        # Convert to numpy
         tokens_np = np.array(token_ids, dtype=np.int32)
 
-        # Prepare inputs
         inputs = []
 
         tokens_input = grpcclient.InferInput("token_ids", list(tokens_np.shape), "INT32")
@@ -253,7 +260,6 @@ async def decode_mesh(
         resolution_input.set_data_from_numpy(resolution_data)
         inputs.append(resolution_input)
 
-        # Prepare outputs
         outputs = [
             grpcclient.InferRequestedOutput("vertices"),
             grpcclient.InferRequestedOutput("faces"),
@@ -261,20 +267,21 @@ async def decode_mesh(
             grpcclient.InferRequestedOutput("num_faces"),
         ]
 
-        # Call Triton
+        # Heartbeat for mesh extraction
+        activity.heartbeat("Extracting mesh...")
+
         result = client.infer(
             model_name=MESH_MODEL_NAME,
             inputs=inputs,
             outputs=outputs,
         )
 
-        # Extract results
         vertices = result.as_numpy("vertices")
         faces = result.as_numpy("faces")
         num_vertices = int(result.as_numpy("num_vertices")[0])
         num_faces = int(result.as_numpy("num_faces")[0])
 
-        activity.logger.info(f"Mesh decoded: {num_vertices} vertices, {num_faces} faces")
+        activity.logger.info(f"[MESH] Done: {num_vertices} verts, {num_faces} faces")
 
         return {
             "vertices": vertices.tolist(),
@@ -284,7 +291,7 @@ async def decode_mesh(
         }
 
     except InferenceServerException as e:
-        activity.logger.error(f"Triton inference failed: {e}")
+        activity.logger.error(f"[MESH] Triton error: {e}")
         raise
     finally:
         client.close()

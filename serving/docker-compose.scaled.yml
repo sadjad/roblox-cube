@@ -1,0 +1,257 @@
+version: '3.8'
+
+# Cube3D Scalable Serving Infrastructure
+#
+# This configuration supports independent scaling of each pipeline stage.
+# Adjust replica counts based on your throughput requirements.
+#
+# Scaling Guidelines (based on latency analysis):
+#   - CLIP: ~20ms/request  → 1 replica handles ~50 req/s
+#   - GPT:  ~10s/request   → Need many replicas for throughput
+#   - Mesh: ~3s/request    → Moderate replicas needed
+#
+# Example for 1 req/s throughput:
+#   - CLIP: 1 replica (handles 50x the needed rate)
+#   - GPT: 10 replicas (each handles 0.1 req/s)
+#   - Mesh: 3 replicas (each handles 0.33 req/s)
+#
+# Usage:
+#   # Set replicas via environment or .env file
+#   CLIP_REPLICAS=1 GPT_REPLICAS=4 MESH_REPLICAS=2 docker-compose -f docker-compose.scaled.yml up -d
+#
+#   # Or scale dynamically
+#   docker-compose -f docker-compose.scaled.yml up -d --scale triton-gpt=8
+
+services:
+  # ==========================================================================
+  # TEMPORAL INFRASTRUCTURE
+  # ==========================================================================
+
+  postgresql:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cube3d-net
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal-config:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cube3d-net
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8088:8080"
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # LOAD BALANCERS (one per model type)
+  # ==========================================================================
+
+  # Nginx load balancer for CLIP Triton replicas
+  lb-clip:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/clip.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - triton-clip
+    ports:
+      - "8101:8001"  # Expose gRPC load balancer
+    networks:
+      - cube3d-net
+
+  # Nginx load balancer for GPT Triton replicas
+  lb-gpt:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/gpt.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - triton-gpt
+    ports:
+      - "8111:8001"
+    networks:
+      - cube3d-net
+
+  # Nginx load balancer for Mesh Triton replicas
+  lb-mesh:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/mesh.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - triton-mesh
+    ports:
+      - "8121:8001"
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # TRITON INFERENCE SERVERS (scalable replicas)
+  # ==========================================================================
+
+  # CLIP Encoder - lightweight, fewer replicas needed
+  triton-clip:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/clip_encoder:/models/clip_encoder:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    deploy:
+      replicas: ${CLIP_REPLICAS:-1}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cube3d-net
+
+  # GPT Generator - BOTTLENECK, needs most replicas
+  triton-gpt:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/gpt_generator:/models/gpt_generator:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    deploy:
+      replicas: ${GPT_REPLICAS:-4}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '4gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    networks:
+      - cube3d-net
+
+  # Mesh Decoder - moderate replicas needed
+  triton-mesh:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models/mesh_decoder:/models/mesh_decoder:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    deploy:
+      replicas: ${MESH_REPLICAS:-2}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '4gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # APPLICATION SERVICES (scalable)
+  # ==========================================================================
+
+  # Temporal Workers - scale to match Triton throughput
+  # Rule of thumb: workers >= max(GPT_REPLICAS, MESH_REPLICAS)
+  worker:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TASK_QUEUE=cube3d-mesh-generation
+      - TEMPORAL_NAMESPACE=default
+      # Point to load balancers, not individual Triton instances
+      - CLIP_TRITON_URL=lb-clip:8001
+      - GPT_TRITON_URL=lb-gpt:8001
+      - MESH_TRITON_URL=lb-mesh:8001
+    deploy:
+      replicas: ${WORKER_REPLICAS:-4}
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # API Gateway - scale based on request rate
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TASK_QUEUE=cube3d-mesh-generation
+      - TEMPORAL_NAMESPACE=default
+    deploy:
+      replicas: ${API_REPLICAS:-2}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+volumes:
+  postgresql-data:
+
+networks:
+  cube3d-net:
+    driver: bridge

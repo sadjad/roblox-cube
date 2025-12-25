@@ -1,0 +1,240 @@
+version: '3.8'
+
+# Cube3D Serving with Temporal-Based Per-Stage Scaling
+#
+# This configuration uses ONLY Temporal for scaling - no nginx load balancers.
+# Each pipeline stage has its own task queue with configurable worker counts.
+#
+# Architecture:
+#   ┌─────────────────────────────────────────────────────────────────────────┐
+#   │                         Temporal Server                                  │
+#   ├─────────────────────────────────────────────────────────────────────────┤
+#   │  cube3d-mesh-generation (workflow queue) ← 1 worker                     │
+#   │  cube3d-clip (activity queue)            ← 1 worker (fast)              │
+#   │  cube3d-gpt (activity queue)             ← N workers (BOTTLENECK)       │
+#   │  cube3d-mesh (activity queue)            ← M workers (medium)           │
+#   └─────────────────────────────────────────────────────────────────────────┘
+#
+# Scaling:
+#   # Scale GPT workers (the bottleneck)
+#   docker-compose -f docker-compose.temporal-scaling.yml up -d --scale worker-gpt=10
+#
+#   # Scale mesh workers
+#   docker-compose -f docker-compose.temporal-scaling.yml up -d --scale worker-mesh=3
+
+services:
+  # ==========================================================================
+  # TEMPORAL INFRASTRUCTURE
+  # ==========================================================================
+
+  postgresql:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cube3d-net
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal-config:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cube3d-net
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8088:8080"
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # TRITON INFERENCE SERVER (Single server, all models)
+  # ==========================================================================
+
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
+    volumes:
+      - ./triton/models:/models:ro
+      - ../:/models/cube3d:ro
+      - ${WEIGHTS_PATH:-./weights}:/models/weights:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '8gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # TEMPORAL WORKERS - Per-Stage Scaling
+  # ==========================================================================
+
+  # Workflow Worker: Orchestrates the pipeline (no GPU needed)
+  # Just 1 is usually enough - it only coordinates, doesn't do inference
+  worker-workflow:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_MODE=per-stage
+      - WORKER_STAGE=workflow
+      - CLIP_TASK_QUEUE=cube3d-clip
+      - GPT_TASK_QUEUE=cube3d-gpt
+      - MESH_TASK_QUEUE=cube3d-mesh
+      - WORKFLOW_TASK_QUEUE=cube3d-mesh-generation
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # CLIP Worker: Text encoding (~20ms per request)
+  # 1 worker handles ~50 req/s - usually 1 is enough
+  worker-clip:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      triton:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_MODE=per-stage
+      - WORKER_STAGE=clip
+      - CLIP_TRITON_URL=triton:8001
+      - CLIP_TASK_QUEUE=cube3d-clip
+    deploy:
+      replicas: ${CLIP_WORKERS:-1}
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # GPT Worker: Token generation (~10s per request) - BOTTLENECK
+  # This is where you need the most workers!
+  # For 1 req/s throughput, need ~10 workers
+  worker-gpt:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      triton:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_MODE=per-stage
+      - WORKER_STAGE=gpt
+      - GPT_TRITON_URL=triton:8001
+      - GPT_TASK_QUEUE=cube3d-gpt
+    deploy:
+      replicas: ${GPT_WORKERS:-4}
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # Mesh Worker: Mesh decoding (~3s per request)
+  # For 1 req/s throughput, need ~3 workers
+  worker-mesh:
+    build:
+      context: .
+      dockerfile: temporal/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      triton:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_MODE=per-stage
+      - WORKER_STAGE=mesh
+      - MESH_TRITON_URL=triton:8001
+      - MESH_TASK_QUEUE=cube3d-mesh
+    deploy:
+      replicas: ${MESH_WORKERS:-2}
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+  # ==========================================================================
+  # API GATEWAY
+  # ==========================================================================
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TASK_QUEUE=cube3d-mesh-generation
+      - TEMPORAL_NAMESPACE=default
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - cube3d-net
+
+volumes:
+  postgresql-data:
+
+networks:
+  cube3d-net:
+    driver: bridge

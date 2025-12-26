@@ -1,0 +1,24 @@
+{{- if and .Values.keda.enabled .Values.keda.temporalAuth.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "cube3d.fullname" . }}-temporal-auth
+  labels:
+    {{- include "cube3d.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: address
+      name: {{ .Values.keda.temporalAuth.secretName }}
+      key: address
+    - parameter: namespace
+      name: {{ .Values.keda.temporalAuth.secretName }}
+      key: namespace
+    {{- if .Values.keda.temporalAuth.tls }}
+    - parameter: tls
+      name: {{ .Values.keda.temporalAuth.secretName }}
+      key: tls-cert
+    - parameter: tlsKey
+      name: {{ .Values.keda.temporalAuth.secretName }}
+      key: tls-key
+    {{- end }}
+{{- end }}

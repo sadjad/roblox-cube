@@ -1,0 +1,17 @@
+{{- if .Values.triton.modelRepository.persistentVolumeClaim.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube3d.fullname" . }}-models
+  labels:
+    {{- include "cube3d.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.triton.modelRepository.persistentVolumeClaim.accessModes | nindent 4 }}
+  {{- if .Values.triton.modelRepository.persistentVolumeClaim.storageClass }}
+  storageClassName: {{ .Values.triton.modelRepository.persistentVolumeClaim.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.triton.modelRepository.persistentVolumeClaim.size }}
+{{- end }}

@@ -1,0 +1,21 @@
+apiVersion: v2
+name: cube3d
+description: Cube3D Text-to-3D Mesh Generation Pipeline with Triton + Temporal
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - 3d-generation
+  - triton
+  - temporal
+  - machine-learning
+  - inference
+
+home: https://github.com/roblox/cube3d
+
+dependencies:
+  - name: temporal
+    version: "0.33.0"
+    repository: https://go.temporal.io/helm-charts
+    condition: temporal.enabled

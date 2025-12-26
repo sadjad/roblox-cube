@@ -1,0 +1,442 @@
+# Cube3D Helm Chart Values
+# Option B: Scale both Workers and Triton independently
+
+# =============================================================================
+# GLOBAL SETTINGS
+# =============================================================================
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+
+# Namespace for all resources
+namespace: cube3d
+
+# =============================================================================
+# TRITON INFERENCE SERVERS (One per model type)
+# =============================================================================
+
+triton:
+  # Common settings for all Triton instances
+  image:
+    repository: nvcr.io/nvidia/tritonserver
+    tag: "24.01-py3"
+    pullPolicy: IfNotPresent
+
+  # Model repository settings
+  modelRepository:
+    # PVC for model weights
+    persistentVolumeClaim:
+      enabled: true
+      storageClass: ""
+      size: 50Gi
+      accessModes:
+        - ReadOnlyMany
+
+  # CLIP Encoder Triton Deployment
+  clip:
+    enabled: true
+    replicaCount: 1
+    modelName: "clip_encoder"
+
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "1"
+        nvidia.com/gpu: "1"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+        nvidia.com/gpu: "1"
+
+    # Autoscaling settings
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 4
+      # Scale based on Temporal queue depth
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-clip
+            targetBacklogCount: "5"
+
+    # Triton config
+    instanceGroups:
+      count: 2  # Multiple instances per GPU
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # GPT Generator Triton Deployment (BOTTLENECK)
+  gpt:
+    enabled: true
+    replicaCount: 4  # Start with more replicas
+    modelName: "gpt_generator"
+
+    resources:
+      requests:
+        memory: "16Gi"
+        cpu: "2"
+        nvidia.com/gpu: "1"
+      limits:
+        memory: "32Gi"
+        cpu: "8"
+        nvidia.com/gpu: "1"
+
+    # Autoscaling settings - GPT needs aggressive scaling
+    autoscaling:
+      enabled: true
+      minReplicas: 4
+      maxReplicas: 50
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-gpt
+            targetBacklogCount: "2"  # Scale up quickly
+
+    # Triton config
+    instanceGroups:
+      count: 1  # GPT is memory intensive
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Mesh Decoder Triton Deployment
+  mesh:
+    enabled: true
+    replicaCount: 2
+    modelName: "mesh_decoder"
+
+    resources:
+      requests:
+        memory: "8Gi"
+        cpu: "2"
+        nvidia.com/gpu: "1"
+      limits:
+        memory: "16Gi"
+        cpu: "4"
+        nvidia.com/gpu: "1"
+
+    # Autoscaling settings
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 15
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-mesh
+            targetBacklogCount: "3"
+
+    # Triton config
+    instanceGroups:
+      count: 2
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+# =============================================================================
+# TEMPORAL WORKERS (One deployment per stage)
+# =============================================================================
+
+workers:
+  image:
+    repository: cube3d/temporal-worker
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  # Common worker settings
+  temporalHost: "temporal-frontend.temporal.svc.cluster.local:7233"
+  temporalNamespace: "default"
+
+  # Workflow Worker (orchestration only, no GPU)
+  workflow:
+    enabled: true
+    replicaCount: 2
+    taskQueue: "cube3d-mesh-generation"
+
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-mesh-generation
+            targetBacklogCount: "10"
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # CLIP Activity Worker
+  clip:
+    enabled: true
+    replicaCount: 1
+    taskQueue: "cube3d-clip"
+    tritonUrl: "triton-clip:8001"
+
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 4
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-clip
+            targetBacklogCount: "5"
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # GPT Activity Worker (matches Triton GPT scaling)
+  gpt:
+    enabled: true
+    replicaCount: 4
+    taskQueue: "cube3d-gpt"
+    tritonUrl: "triton-gpt:8001"
+
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "200m"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+
+    autoscaling:
+      enabled: true
+      minReplicas: 4
+      maxReplicas: 50
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-gpt
+            targetBacklogCount: "2"
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Mesh Activity Worker
+  mesh:
+    enabled: true
+    replicaCount: 2
+    taskQueue: "cube3d-mesh"
+    tritonUrl: "triton-mesh:8001"
+
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 15
+      kedaEnabled: true
+      kedaTriggers:
+        - type: temporal
+          metadata:
+            taskQueue: cube3d-mesh
+            targetBacklogCount: "3"
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+# =============================================================================
+# API GATEWAY
+# =============================================================================
+
+api:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: cube3d/api-gateway
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  temporalHost: "temporal-frontend.temporal.svc.cluster.local:7233"
+  temporalNamespace: "default"
+  taskQueue: "cube3d-mesh-generation"
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+  service:
+    type: ClusterIP
+    port: 8080
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    hosts:
+      - host: cube3d.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =============================================================================
+# TEMPORAL (Subchart configuration)
+# =============================================================================
+
+temporal:
+  enabled: true
+
+  # Use external Temporal cluster instead of deploying one
+  external:
+    enabled: false
+    host: ""
+    port: 7233
+
+  # Temporal server settings (when deploying with chart)
+  server:
+    replicaCount: 3
+
+    config:
+      persistence:
+        default:
+          driver: "sql"
+          sql:
+            driver: "postgres12"
+            host: postgresql
+            port: 5432
+            database: temporal
+            user: temporal
+            password: temporal
+
+  # Web UI
+  web:
+    enabled: true
+    replicaCount: 1
+
+    ingress:
+      enabled: true
+      hosts:
+        - host: temporal.example.com
+          paths:
+            - path: /
+              pathType: Prefix
+
+  # PostgreSQL for Temporal
+  postgresql:
+    enabled: true
+    auth:
+      postgresPassword: temporal
+      username: temporal
+      password: temporal
+      database: temporal
+    primary:
+      persistence:
+        size: 10Gi
+
+# =============================================================================
+# KEDA (Autoscaling)
+# =============================================================================
+
+keda:
+  # Assume KEDA is already installed in cluster
+  enabled: true
+
+  # Temporal trigger authentication
+  temporalAuth:
+    # For clusters requiring auth
+    enabled: false
+    secretName: temporal-auth
+    # Keys in secret: address, namespace, tls-cert, tls-key
+
+# =============================================================================
+# MONITORING
+# =============================================================================
+
+monitoring:
+  enabled: true
+
+  # ServiceMonitor for Prometheus
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    labels:
+      release: prometheus
+
+  # Grafana dashboards
+  grafanaDashboards:
+    enabled: true
+    labels:
+      grafana_dashboard: "1"
+
+# =============================================================================
+# COMMON SETTINGS
+# =============================================================================
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

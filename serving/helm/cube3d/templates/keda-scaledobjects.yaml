@@ -1,0 +1,257 @@
+{{- if .Values.keda.enabled }}
+# =============================================================================
+# KEDA ScaledObjects for Temporal Queue-Based Autoscaling
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Triton CLIP ScaledObject
+# -----------------------------------------------------------------------------
+{{- if and .Values.triton.clip.enabled .Values.triton.clip.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-triton-clip-scaler
+  labels:
+    {{- include "cube3d.triton.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: clip
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-triton-clip
+  minReplicaCount: {{ .Values.triton.clip.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.triton.clip.autoscaling.maxReplicas }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    {{- range .Values.triton.clip.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Triton GPT ScaledObject (BOTTLENECK - scales aggressively)
+# -----------------------------------------------------------------------------
+{{- if and .Values.triton.gpt.enabled .Values.triton.gpt.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-triton-gpt-scaler
+  labels:
+    {{- include "cube3d.triton.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: gpt
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-triton-gpt
+  minReplicaCount: {{ .Values.triton.gpt.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.triton.gpt.autoscaling.maxReplicas }}
+  pollingInterval: 10
+  cooldownPeriod: 30
+  triggers:
+    {{- range .Values.triton.gpt.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Triton Mesh ScaledObject
+# -----------------------------------------------------------------------------
+{{- if and .Values.triton.mesh.enabled .Values.triton.mesh.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-triton-mesh-scaler
+  labels:
+    {{- include "cube3d.triton.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: mesh
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-triton-mesh
+  minReplicaCount: {{ .Values.triton.mesh.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.triton.mesh.autoscaling.maxReplicas }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    {{- range .Values.triton.mesh.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Worker Workflow ScaledObject
+# -----------------------------------------------------------------------------
+{{- if and .Values.workers.workflow.enabled .Values.workers.workflow.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-workflow-scaler
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: workflow
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-worker-workflow
+  minReplicaCount: {{ .Values.workers.workflow.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.workers.workflow.autoscaling.maxReplicas }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    {{- range .Values.workers.workflow.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Worker CLIP ScaledObject
+# -----------------------------------------------------------------------------
+{{- if and .Values.workers.clip.enabled .Values.workers.clip.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-clip-scaler
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: clip
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-worker-clip
+  minReplicaCount: {{ .Values.workers.clip.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.workers.clip.autoscaling.maxReplicas }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    {{- range .Values.workers.clip.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Worker GPT ScaledObject (matches Triton GPT scaling)
+# -----------------------------------------------------------------------------
+{{- if and .Values.workers.gpt.enabled .Values.workers.gpt.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-gpt-scaler
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: gpt
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-worker-gpt
+  minReplicaCount: {{ .Values.workers.gpt.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.workers.gpt.autoscaling.maxReplicas }}
+  pollingInterval: 10
+  cooldownPeriod: 30
+  triggers:
+    {{- range .Values.workers.gpt.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+
+# -----------------------------------------------------------------------------
+# Worker Mesh ScaledObject
+# -----------------------------------------------------------------------------
+{{- if and .Values.workers.mesh.enabled .Values.workers.mesh.autoscaling.kedaEnabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-mesh-scaler
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: mesh
+spec:
+  scaleTargetRef:
+    name: {{ include "cube3d.fullname" . }}-worker-mesh
+  minReplicaCount: {{ .Values.workers.mesh.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.workers.mesh.autoscaling.maxReplicas }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    {{- range .Values.workers.mesh.autoscaling.kedaTriggers }}
+    - type: {{ .type }}
+      metadata:
+        {{- if .metadata.taskQueue }}
+        address: {{ include "cube3d.temporalHost" $ }}
+        namespace: {{ $.Values.workers.temporalNamespace }}
+        taskQueue: {{ .metadata.taskQueue }}
+        targetBacklogCount: {{ .metadata.targetBacklogCount | quote }}
+        {{- end }}
+      {{- if $.Values.keda.temporalAuth.enabled }}
+      authenticationRef:
+        name: {{ include "cube3d.fullname" $ }}-temporal-auth
+      {{- end }}
+    {{- end }}
+{{- end }}
+
+{{- end }}

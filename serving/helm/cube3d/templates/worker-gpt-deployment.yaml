@@ -1,0 +1,73 @@
+{{- if .Values.workers.gpt.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-gpt
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: gpt
+spec:
+  {{- if not .Values.workers.gpt.autoscaling.enabled }}
+  replicas: {{ .Values.workers.gpt.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/stage: gpt
+  template:
+    metadata:
+      labels:
+        {{- include "cube3d.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/stage: gpt
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cube3d.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.workers.image.repository }}:{{ .Values.workers.image.tag }}"
+          imagePullPolicy: {{ .Values.workers.image.pullPolicy }}
+          env:
+            - name: TEMPORAL_HOST
+              value: {{ include "cube3d.temporalHost" . | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.workers.temporalNamespace | quote }}
+            - name: WORKER_MODE
+              value: "per-stage"
+            - name: WORKER_STAGE
+              value: "gpt"
+            - name: GPT_TASK_QUEUE
+              value: {{ .Values.workers.gpt.taskQueue | quote }}
+            - name: GPT_TRITON_URL
+              value: {{ .Values.workers.gpt.tritonUrl | quote }}
+          resources:
+            {{- toYaml .Values.workers.gpt.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      {{- with .Values.workers.gpt.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workers.gpt.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workers.gpt.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

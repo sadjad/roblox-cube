@@ -1,0 +1,112 @@
+Cube3D has been deployed!
+
+=============================================================================
+DEPLOYMENT SUMMARY
+=============================================================================
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Components deployed:
+{{- if .Values.triton.clip.enabled }}
+  - Triton CLIP: {{ .Values.triton.clip.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.triton.gpt.enabled }}
+  - Triton GPT: {{ .Values.triton.gpt.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.triton.mesh.enabled }}
+  - Triton Mesh: {{ .Values.triton.mesh.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.workers.workflow.enabled }}
+  - Workflow Workers: {{ .Values.workers.workflow.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.workers.clip.enabled }}
+  - CLIP Workers: {{ .Values.workers.clip.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.workers.gpt.enabled }}
+  - GPT Workers: {{ .Values.workers.gpt.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.workers.mesh.enabled }}
+  - Mesh Workers: {{ .Values.workers.mesh.replicaCount }} replica(s)
+{{- end }}
+{{- if .Values.api.enabled }}
+  - API Gateway: {{ .Values.api.replicaCount }} replica(s)
+{{- end }}
+
+=============================================================================
+ACCESSING THE API
+=============================================================================
+
+{{- if .Values.api.ingress.enabled }}
+The API is accessible via Ingress:
+{{- range .Values.api.ingress.hosts }}
+  http{{ if $.Values.api.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if eq .Values.api.service.type "LoadBalancer" }}
+Get the LoadBalancer IP:
+  kubectl get svc {{ include "cube3d.fullname" . }}-api -n {{ .Release.Namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+{{- else }}
+Port-forward to access the API:
+  kubectl port-forward svc/{{ include "cube3d.fullname" . }}-api {{ .Values.api.service.port }}:{{ .Values.api.service.port }} -n {{ .Release.Namespace }}
+
+Then access at: http://localhost:{{ .Values.api.service.port }}
+{{- end }}
+
+=============================================================================
+EXAMPLE REQUEST
+=============================================================================
+
+Generate a 3D mesh:
+
+  curl -X POST http://localhost:{{ .Values.api.service.port }}/generate \
+    -H "Content-Type: application/json" \
+    -d '{"prompt": "a wooden chair", "guidance_scale": 3.0}'
+
+Check status:
+
+  curl http://localhost:{{ .Values.api.service.port }}/status/{workflow_id}
+
+=============================================================================
+MONITORING
+=============================================================================
+
+{{- if .Values.monitoring.enabled }}
+Prometheus metrics are exposed at :8002/metrics on each Triton pod.
+
+Check pod status:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Check autoscaling status:
+  kubectl get scaledobjects -n {{ .Release.Namespace }}
+  kubectl get hpa -n {{ .Release.Namespace }}
+{{- end }}
+
+=============================================================================
+SCALING
+=============================================================================
+
+The GPT stage is the bottleneck. To handle more throughput:
+
+1. Scale GPT Triton pods (each needs 1 GPU):
+   kubectl scale deployment {{ include "cube3d.fullname" . }}-triton-gpt --replicas=10
+
+2. Scale GPT workers to match:
+   kubectl scale deployment {{ include "cube3d.fullname" . }}-worker-gpt --replicas=10
+
+Or with KEDA enabled, scaling happens automatically based on Temporal queue depth.
+
+=============================================================================
+TROUBLESHOOTING
+=============================================================================
+
+Check Triton health:
+  kubectl exec -it deploy/{{ include "cube3d.fullname" . }}-triton-gpt -- curl localhost:8000/v2/health/ready
+
+Check Temporal connection:
+  kubectl logs deploy/{{ include "cube3d.fullname" . }}-worker-workflow
+
+View Temporal UI (if enabled):
+{{- if .Values.temporal.web.enabled }}
+  kubectl port-forward svc/temporal-web 8088:8080 -n {{ .Release.Namespace }}
+  Then open: http://localhost:8088
+{{- end }}

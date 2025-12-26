@@ -1,0 +1,73 @@
+{{- if .Values.workers.clip.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-clip
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: clip
+spec:
+  {{- if not .Values.workers.clip.autoscaling.enabled }}
+  replicas: {{ .Values.workers.clip.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/stage: clip
+  template:
+    metadata:
+      labels:
+        {{- include "cube3d.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/stage: clip
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cube3d.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.workers.image.repository }}:{{ .Values.workers.image.tag }}"
+          imagePullPolicy: {{ .Values.workers.image.pullPolicy }}
+          env:
+            - name: TEMPORAL_HOST
+              value: {{ include "cube3d.temporalHost" . | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.workers.temporalNamespace | quote }}
+            - name: WORKER_MODE
+              value: "per-stage"
+            - name: WORKER_STAGE
+              value: "clip"
+            - name: CLIP_TASK_QUEUE
+              value: {{ .Values.workers.clip.taskQueue | quote }}
+            - name: CLIP_TRITON_URL
+              value: {{ .Values.workers.clip.tritonUrl | quote }}
+          resources:
+            {{- toYaml .Values.workers.clip.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      {{- with .Values.workers.clip.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workers.clip.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workers.clip.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

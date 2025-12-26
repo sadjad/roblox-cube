@@ -1,0 +1,98 @@
+{{- if .Values.triton.clip.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube3d.fullname" . }}-triton-clip
+  labels:
+    {{- include "cube3d.triton.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: clip
+spec:
+  {{- if not .Values.triton.clip.autoscaling.enabled }}
+  replicas: {{ .Values.triton.clip.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: triton
+      app.kubernetes.io/stage: clip
+  template:
+    metadata:
+      labels:
+        {{- include "cube3d.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: triton
+        app.kubernetes.io/stage: clip
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cube3d.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: triton
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.triton.image.repository }}:{{ .Values.triton.image.tag }}"
+          imagePullPolicy: {{ .Values.triton.image.pullPolicy }}
+          command:
+            - tritonserver
+            - --model-repository=/models
+            - --model-control-mode=explicit
+            - --load-model={{ .Values.triton.clip.modelName }}
+            - --log-verbose=1
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: grpc
+              containerPort: 8001
+              protocol: TCP
+            - name: metrics
+              containerPort: 8002
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /v2/health/live
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.triton.clip.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-repository
+              mountPath: /models
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-repository
+          {{- if .Values.triton.modelRepository.persistentVolumeClaim.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube3d.fullname" . }}-models
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+      {{- with .Values.triton.clip.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.triton.clip.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.triton.clip.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

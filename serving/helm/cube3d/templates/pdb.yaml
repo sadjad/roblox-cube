@@ -1,0 +1,55 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# PodDisruptionBudget for Triton GPT (critical component)
+{{- if .Values.triton.gpt.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cube3d.fullname" . }}-triton-gpt
+  labels:
+    {{- include "cube3d.triton.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: gpt
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: triton
+      app.kubernetes.io/stage: gpt
+---
+{{- end }}
+
+# PodDisruptionBudget for API Gateway
+{{- if .Values.api.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cube3d.fullname" . }}-api
+  labels:
+    {{- include "cube3d.api.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+---
+{{- end }}
+
+# PodDisruptionBudget for Workflow Workers
+{{- if .Values.workers.workflow.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cube3d.fullname" . }}-worker-workflow
+  labels:
+    {{- include "cube3d.worker.labels" . | nindent 4 }}
+    app.kubernetes.io/stage: workflow
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "cube3d.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/stage: workflow
+{{- end }}
+{{- end }}
